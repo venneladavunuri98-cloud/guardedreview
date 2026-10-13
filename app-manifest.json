@@ -1,0 +1,18 @@
+{
+  "display_information": {
+    "name": "GuardedReview",
+    "description": "AI code review drafts that need human approval"
+  },
+  "features": {
+    "bot_user": { "display_name": "GuardedReview", "always_online": false }
+  },
+  "oauth_config": {
+    "scopes": { "bot": ["chat:write", "channels:read"] }
+  },
+  "settings": {
+    "interactivity": { "is_enabled": false },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

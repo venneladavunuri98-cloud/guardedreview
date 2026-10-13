@@ -1,0 +1,636 @@
+{
+  "name": "GuardedReview - AI Code Review with Approval Gate",
+  "nodes": [
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "value": "YOUR_GITHUB_USERNAME_OR_ORG",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "YOUR_REPO_NAME",
+          "mode": "name"
+        },
+        "events": [
+          "pull_request"
+        ]
+      },
+      "id": "8bd8f818-cb75-4214-b0d4-cf81c1d2a5ae",
+      "name": "1. GitHub Trigger (PR opened/updated)",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "416e1a2c-972d-4d11-9b04-9e2490354ffd",
+              "leftValue": "={{ $json.body.pull_request.draft }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "7ffed55b-c3a9-4087-be47-9b972a9924a8",
+              "leftValue": "={{ $json.body.action }}",
+              "rightValue": "^(opened|synchronize|ready_for_review)$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "59fa2528-68f9-4404-98c0-a34fa6a55cd0",
+      "name": "2. Filter: Not Draft + Relevant Action",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1380,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.body.repository.full_name }}/pulls/{{ $json.body.pull_request.number }}/files?per_page=100",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "d6bba409-4257-494a-a8f2-81650ceb762d",
+      "name": "3. Get PR Diff / Changed Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1160,
+        -80
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 4: drop lockfiles, generated files and sensitive paths; enforce a size budget\nconst SENSITIVE_PATH_PATTERNS = [/(^|\\/)secrets\\//i, /(^|\\/)config\\//i, /\\.env/i];\nconst SKIP_FILENAME_PATTERNS = [/package-lock\\.json$/, /yarn\\.lock$/, /\\.min\\.(js|css)$/, /(^|\\/)dist\\//];\nconst MAX_TOTAL_DIFF_CHARS = 40000; // tune to your token budget\n\nconst files = $input.all().map(i => i.json).filter(f => f && f.filename && f.patch);\nconst kept = [];\nconst excluded = [];\n\nfor (const f of files) {\n  const sensitive = SENSITIVE_PATH_PATTERNS.some(p => p.test(f.filename));\n  const skippable = SKIP_FILENAME_PATTERNS.some(p => p.test(f.filename));\n  if (sensitive || skippable) {\n    excluded.push({ filename: f.filename, reason: sensitive ? 'sensitive_path' : 'generated_or_lockfile' });\n  } else {\n    kept.push({ filename: f.filename, patch: f.patch });\n  }\n}\n\nconst totalChars = kept.reduce((s, f) => s + f.patch.length, 0);\nconst overBudget = totalChars > MAX_TOTAL_DIFF_CHARS;\n\nreturn [{ json: {\n  files: overBudget ? [] : kept,\n  excluded_files: excluded,\n  over_budget: overBudget,\n  total_chars: totalChars,\n  send_to_llm: !overBudget && kept.length > 0\n} }];"
+      },
+      "id": "2cb97ba8-2af8-4195-9fa5-46eb2218c2ae",
+      "name": "4. Filter Sensitive/Irrelevant Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -940,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "492ebe8a-0f35-48ae-89f6-6093c2dc21b1",
+              "leftValue": "={{ $json.send_to_llm }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f3a87c66-c156-416b-9757-353f8412ac0a",
+      "name": "4b. IF: OK to Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=:information_source: GuardedReview skipped PR #{{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }}. Over budget: {{ $json.over_budget }} ({{ $json.total_chars }} chars). Excluded files: {{ $json.excluded_files.length }}. Nothing was sent to the LLM.",
+        "otherOptions": {}
+      },
+      "id": "47dd3ac0-ebbf-4796-b1c0-f59cae26dce5",
+      "name": "4c. Alert: Skipped (Over Budget / Nothing to Review)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -500,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 5: redaction pass - regex + simple entropy check\n// DEMO-GRADE ONLY: will not catch names, free-text PII or internal systems not in DENY_LIST\nfunction shannonEntropy(str) {\n  const freq = {};\n  for (const ch of str) freq[ch] = (freq[ch] || 0) + 1;\n  return Object.values(freq).reduce((sum, c) => {\n    const p = c / str.length;\n    return sum - p * Math.log2(p);\n  }, 0);\n}\n\nconst PATTERNS = [\n  { name: 'email', regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g },\n  { name: 'api_key_like', regex: /(sk|pk|api|key|secret|token)[_-]?[A-Za-z0-9_]{16,}/gi },\n  { name: 'jwt', regex: /eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/g },\n  { name: 'ip_address', regex: /\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g },\n  { name: 'phone', regex: /\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b/g }\n];\n\n// Add your own internal hostnames / service names here\nconst DENY_LIST = ['internal-service.example.local'];\n\nconst ENTROPY_THRESHOLD = 4.0; // tune against real diffs\nconst MIN_TOKEN_LEN = 20;\n\nconst input = $input.first().json;\nconst redactedFiles = [];\nconst report = { counts: {}, files_excluded: input.excluded_files || [] };\nconst bump = k => { report.counts[k] = (report.counts[k] || 0) + 1; };\n\nfor (const f of (input.files || [])) {\n  let text = f.patch;\n\n  for (const p of PATTERNS) {\n    const matches = text.match(p.regex) || [];\n    matches.forEach(() => bump(p.name));\n    text = text.replace(p.regex, `[REDACTED_${p.name.toUpperCase()}]`);\n  }\n\n  for (const host of DENY_LIST) {\n    if (host && text.includes(host)) {\n      text = text.split(host).join('[REDACTED_INTERNAL_HOST]');\n      bump('internal_host');\n    }\n  }\n\n  for (const tok of text.split(/\\s+/)) {\n    if (tok.length >= MIN_TOKEN_LEN && !tok.startsWith('[REDACTED_') && shannonEntropy(tok) > ENTROPY_THRESHOLD) {\n      text = text.split(tok).join('[REDACTED_HIGH_ENTROPY]');\n      bump('high_entropy');\n    }\n  }\n\n  redactedFiles.push({ filename: f.filename, redacted_patch: text });\n}\n\nreturn [{ json: { redacted_files: redactedFiles, redaction_report: report } }];"
+      },
+      "id": "5c411fb6-e3d5-4bac-835e-d907df9b70ac",
+      "name": "5. Redaction Pass",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -500,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: \"You are a code-review assistant operating on a REDACTED diff. Placeholders like [REDACTED_EMAIL] or [REDACTED_API_KEY_LIKE] are opaque - never guess their original values. Analyze for: (1) missing/weak test coverage, (2) common bug patterns, (3) style/consistency issues, (4) risk flags (auth, data-access, external-call changes). Respond ONLY with valid JSON matching this schema, no prose, no code fences: {\\\"summary\\\": string, \\\"test_suggestions\\\": [{\\\"file\\\": string, \\\"description\\\": string, \\\"priority\\\": \\\"high|medium|low\\\"}], \\\"review_notes\\\": [{\\\"file\\\": string, \\\"line_hint\\\": string, \\\"issue\\\": string, \\\"severity\\\": \\\"high|medium|low\\\"}], \\\"risk_flags\\\": [{\\\"category\\\": string, \\\"reason\\\": string}], \\\"confidence_score\\\": number between 0 and 1}.\\n\\nDiff:\\n\\n\" + $json.redacted_files.map(f => f.filename + ':\\n' + f.redacted_patch).join('\\n\\n') }] }) }}",
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "08c71797-6c12-4cf9-92c2-34eaff1bdf12",
+      "name": "6. OpenAI API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -280,
+        -160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 7: validate the model's JSON against the expected schema\nconst raw = $input.first().json;\nlet text = (raw.choices && raw.choices[0] && raw.choices[0].message && raw.choices[0].message.content) || '';\ntext = text.trim().replace(/^```(?:json)?\\s*/i, '').replace(/```$/, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  return [{ json: { valid: false, error: 'malformed_json', raw_text: text.slice(0, 500) } }];\n}\n\nconst arrays = ['test_suggestions', 'review_notes', 'risk_flags'];\nconst problems = [];\nif (typeof parsed.summary !== 'string') problems.push('summary');\nfor (const k of arrays) if (!Array.isArray(parsed[k])) problems.push(k);\nif (typeof parsed.confidence_score !== 'number') problems.push('confidence_score');\n\nif (problems.length) {\n  return [{ json: { valid: false, error: 'schema_mismatch', problems } }];\n}\nreturn [{ json: { valid: true, ...parsed } }];"
+      },
+      "id": "a213b4d4-7a68-4e5d-a24f-2a29f1243605",
+      "name": "7. Validate JSON Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -60,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "e08731f4-5169-42f7-aec6-a34b94aa0530",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "92feb4e3-7bbe-4a12-a3a3-787222f22288",
+      "name": "7b. IF: Valid AI Output?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=:warning: GuardedReview: AI output for PR #{{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }} failed validation ({{ $json.error }} {{ ($json.problems || []).join(', ') }}). Nothing was sent for approval or posted.",
+        "otherOptions": {}
+      },
+      "id": "6978b8a6-86ab-48b0-ae45-bb01af368c25",
+      "name": "7c. Alert: Invalid AI Output (Not Sent for Approval)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        380,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "message": "=*New AI Code Review* on PR #{{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }}\n\n*Summary:* {{ $json.summary }}\n*Confidence:* {{ $json.confidence_score }}\n*Redactions:* {{ JSON.stringify($('5. Redaction Pass').first().json.redaction_report.counts) }}\n\n*Test suggestions:*\n{{ $json.test_suggestions.map(t => '- [' + t.priority + '] ' + t.file + ': ' + t.description).join('\\n') || '- none' }}\n\n*Review notes:*\n{{ $json.review_notes.map(n => '- [' + n.severity + '] ' + n.file + ' (' + n.line_hint + '): ' + n.issue).join('\\n') || '- none' }}\n\n*Risk flags:*\n{{ $json.risk_flags.map(r => '- ' + r.category + ': ' + r.reason).join('\\n') || '- none' }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Approve",
+            "disapproveLabel": "Reject"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 24,
+              "resumeUnit": "hours"
+            }
+          }
+        }
+      },
+      "id": "cdc9bbd2-7028-423b-afb7-6ba58e466c84",
+      "name": "8. Slack - Send & Wait for Approval",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        380,
+        -260
+      ],
+      "webhookId": "eaeff7f2-4311-4078-a064-3d8b1c6a06bc"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "f8fece1d-db08-418f-8b78-8ae122dc9b7a",
+              "leftValue": "={{ $json.data && $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "72f0c920-46db-4550-8d58-95bf3c3fcea7",
+      "name": "9. IF: Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        600,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "createComment",
+        "owner": {
+          "__rl": true,
+          "value": "={{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.repository.owner.login }}",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "={{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.repository.name }}",
+          "mode": "name"
+        },
+        "issueNumber": "={{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }}",
+        "body": "=**AI Review (human-approved)**\n\n{{ $('7. Validate JSON Schema').first().json.summary }}\n\n**Test suggestions:**\n{{ $('7. Validate JSON Schema').first().json.test_suggestions.map(t => '- ' + t.file + ': ' + t.description).join('\\n') }}\n\n**Review notes:**\n{{ $('7. Validate JSON Schema').first().json.review_notes.map(n => '- ' + n.file + ' (' + n.line_hint + '): ' + n.issue).join('\\n') }}"
+      },
+      "id": "689f8831-77a2-4cc3-a79d-7f9e5605286e",
+      "name": "10a. Post GitHub Comment (Approved)",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [
+        820,
+        -360
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 10b: rejected or timed out - nothing is posted\nreturn [{ json: { action_taken: 'none', reason: 'rejected_or_expired' } }];"
+      },
+      "id": "7bf53db5-2a7a-4eae-8183-4a5ab97eac45",
+      "name": "10b. Rejected/Expired - No Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "audit_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "pr_id": "={{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }}",
+            "repo": "={{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.repository.full_name }}",
+            "files_touched": "={{ JSON.stringify(($('4. Filter Sensitive/Irrelevant Files').first().json.files || []).map(f => f.filename)) }}",
+            "ai_output_hash": "={{ JSON.stringify($('7. Validate JSON Schema').first().json).hash('sha256') }}",
+            "redaction_summary": "={{ JSON.stringify($('5. Redaction Pass').first().json.redaction_report) }}",
+            "approver_id": "={{ ($('8. Slack - Send & Wait for Approval').first().json.data || {}).approvedBy || 'not_captured' }}",
+            "decision": "={{ ($('8. Slack - Send & Wait for Approval').first().json.data || {}).approved ? 'approved' : 'rejected_or_expired' }}",
+            "decision_timestamp": "={{ $now.toISO() }}",
+            "workflow_run_id": "={{ $execution.id }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "e77f17c8-b5ed-4c72-9fbd-399f660c071f",
+      "name": "11. Write Audit Row (Postgres, insert-only role)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1040,
+        -260
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=:rotating_light: GuardedReview pipeline failure on PR #{{ $('1. GitHub Trigger (PR opened/updated)').first().json.body.pull_request.number }}. Check the n8n execution log ({{ $execution.id }}) for node-level detail.",
+        "otherOptions": {}
+      },
+      "id": "8121d472-e8f2-4768-b649-4e95364476d6",
+      "name": "ERROR: Platform-Ops Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -60,
+        260
+      ]
+    }
+  ],
+  "connections": {
+    "1. GitHub Trigger (PR opened/updated)": {
+      "main": [
+        [
+          {
+            "node": "2. Filter: Not Draft + Relevant Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Filter: Not Draft + Relevant Action": {
+      "main": [
+        [
+          {
+            "node": "3. Get PR Diff / Changed Files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "3. Get PR Diff / Changed Files": {
+      "main": [
+        [
+          {
+            "node": "4. Filter Sensitive/Irrelevant Files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ERROR: Platform-Ops Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Filter Sensitive/Irrelevant Files": {
+      "main": [
+        [
+          {
+            "node": "4b. IF: OK to Send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4b. IF: OK to Send?": {
+      "main": [
+        [
+          {
+            "node": "5. Redaction Pass",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "4c. Alert: Skipped (Over Budget / Nothing to Review)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Redaction Pass": {
+      "main": [
+        [
+          {
+            "node": "6. OpenAI API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. OpenAI API Call": {
+      "main": [
+        [
+          {
+            "node": "7. Validate JSON Schema",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ERROR: Platform-Ops Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Validate JSON Schema": {
+      "main": [
+        [
+          {
+            "node": "7b. IF: Valid AI Output?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7b. IF: Valid AI Output?": {
+      "main": [
+        [
+          {
+            "node": "8. Slack - Send & Wait for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "7c. Alert: Invalid AI Output (Not Sent for Approval)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8. Slack - Send & Wait for Approval": {
+      "main": [
+        [
+          {
+            "node": "9. IF: Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9. IF: Approved?": {
+      "main": [
+        [
+          {
+            "node": "10a. Post GitHub Comment (Approved)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "10b. Rejected/Expired - No Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10a. Post GitHub Comment (Approved)": {
+      "main": [
+        [
+          {
+            "node": "11. Write Audit Row (Postgres, insert-only role)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ERROR: Platform-Ops Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10b. Rejected/Expired - No Action": {
+      "main": [
+        [
+          {
+            "node": "11. Write Audit Row (Postgres, insert-only role)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11. Write Audit Row (Postgres, insert-only role)": {
+      "main": [
+        [],
+        [
+          {
+            "node": "ERROR: Platform-Ops Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
