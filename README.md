@@ -40,7 +40,7 @@ I tested it end to end on a separate sandbox repository. The test was a pull req
 | ![Workflow run](01-workflow-run.png) | ![Slack approval](02-slack-approval.png) |
 | Workflow run in n8n | Approval request in Slack |
 
-![PR comment](03-pr-comment.png)
+![PR comment](03-pr-comment.png.png)
 
 *Approved review posted on the PR*
 
