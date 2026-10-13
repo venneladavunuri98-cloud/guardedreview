@@ -1,0 +1,4 @@
+# Show the repo by its main content, not the SQL setup script
+*.sql linguist-detectable=false
+*.json linguist-detectable=true
+*.json linguist-language=JSON
